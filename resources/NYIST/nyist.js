@@ -11,9 +11,9 @@
 //   GET  /admin/xsd/pkgl/xskb/sdpkkbList?xnxq=&xhid=&xqdm=&xskbxslx=0 课程数据 JSON（data[]）
 //
 // 已实测的南阳理工细节：
-//   1. 校区有两个：校本部（默认，42BE4B65...）与东校区（E9A24945...）。
-//      实测两个校区的学生课表与作息完全一致（接口按学号返回），选错也不会丢课；
-//      但仍保留校区单选，默认当前课表页所在校区，便于以后校区数据分化时不用改代码。
+//   1. 校区有两个：校本部（42BE4B65...）与东校区（E9A24945...）。
+//      实测两者的学生课表与作息完全一致（接口按学号返回，不按校区过滤），
+//      因此【不再让用户选择校区】，固定使用「校本部」；接口异常时退回课表页里的 #xqdm。
 //   2. 课时时间取自接口（1~10 节，上午 8:00 开始、晚上 19:00 开始），接口异常时回退到内置作息。
 //   3. 课程按“单节”返回（djc = 第几节），需把连续节次合并；同一门课还会拆成多个周次段
 //      （如 1,2,3,4 与 5,6,7,8），需按“同课同节”合并周次，单双周才不会被拆成两条。
@@ -26,15 +26,15 @@
 //      所以本脚本【始终从课表页取参数】，不依赖用户当前停留的页面。
 //   6. 开学日期与总周数都取自 getZclistByXnxq 的 zclist（2026-2027-1 为 19 周，第 1 周 2026-09-07 起）。
 //
-// 维护者：hyh
+// 维护者：阿巴怪
 
 // 学期选择：默认弹出单选列表，并把教务标记的“当前学期”作为默认项。
 // 常用场景直接确认即可；学期还没开始时也可以在这里改选下学期提前导入。
 const ASK_SEMESTER = true;
 
-// 校区选择：默认弹出单选列表，默认选中当前课表页所在校区（校本部）。
-// 若你在东校区上课，在这里改选即可；把值改成 false 则完全不弹窗、始终用页面校区。
-const ASK_CAMPUS = true;
+// 校区：不再弹窗选择。优先使用该名称的校区，找不到则用课表页的 #xqdm。
+// （实测两校区返回的课表与作息完全相同，选择校区没有任何意义）
+const PREFERRED_CAMPUS_NAME = "校本部";
 
 // 接口异常时的兜底作息（2026-2027-1 实测值，正常情况不会用到）
 const FALLBACK_TIME_SLOTS = [
@@ -331,27 +331,24 @@ async function fetchCampusList() {
     return list;
 }
 
-async function chooseCampus(pageXqdm) {
-    let campusList = null;
+// 固定使用「校本部」，不再询问用户：
+//   实测两个校区的学生课表与作息完全一致（接口按学号返回，不按校区过滤），
+//   弹窗只是多一步点击，所以这里静默取用。
+//   取不到校区列表 / 名称不匹配时，退回课表页里的 #xqdm，保证流程不中断。
+async function pickCampus(pageXqdm) {
     try {
-        campusList = await fetchCampusList();
+        const campusList = await fetchCampusList();
+        const byName = campusList.find(item => item.xqmc.indexOf(PREFERRED_CAMPUS_NAME) >= 0);
+        if (byName) return byName;
+
+        const byCode = campusList.find(item => item.xqdm === pageXqdm);
+        if (byCode) return byCode;
+
+        return campusList[0];
     } catch (error) {
-        console.warn("[NYIST] 获取校区列表失败：" + error.message);
-        toast("获取校区列表失败，沿用当前页面校区继续导入。");
+        console.warn("[NYIST] 获取校区列表失败，沿用课表页校区：" + error.message);
         return { xqdm: pageXqdm, xqmc: "" };
     }
-
-    let defaultIndex = campusList.findIndex(item => item.xqdm === pageXqdm);
-    if (defaultIndex < 0) defaultIndex = 0;
-
-    if (!ASK_CAMPUS) {
-        return campusList[defaultIndex];
-    }
-
-    const labels = campusList.map(item => item.xqmc);
-    const index = await chooseFromList("选择校区", labels, defaultIndex);
-    if (index === null || index === undefined || index < 0) return null;
-    return campusList[index];
 }
 
 // =========================================================================
@@ -601,12 +598,8 @@ async function runImportFlow() {
             return;
         }
 
-        // 4. 校区
-        const campus = await chooseCampus(pageXqdm);
-        if (!campus) {
-            toast("导入已取消：未选择校区。");
-            return;
-        }
+        // 4. 校区（固定校本部，不询问用户）
+        const campus = await pickCampus(pageXqdm);
 
         toast(`正在导入 ${xnxq}${campus.xqmc ? " · " + campus.xqmc : ""} ...`);
 
@@ -618,8 +611,7 @@ async function runImportFlow() {
                 `${xnxq} 学期未获取到任何课程数据。\n\n` +
                 `请依次确认：\n` +
                 `1. 学年学期是否选对；\n` +
-                `2. 校区是否选对（校本部 / 东校区 课表不同）；\n` +
-                `3. 该学期是否已经排课。\n\n` +
+                `2. 该学期是否已经排课。\n\n` +
                 `诊断信息：${diagnoseInfo}`
             );
             return;
